@@ -477,9 +477,5 @@ def main():
                 pygame.display.update()
 
 
-# 1sc2dv
-# %localappdata%\Packages\Microsoft.MinecraftUWP_8wekyb3d8bbwe\LocalState\games\com.mojang
-
-
 if __name__ == "__main__":
     main()
