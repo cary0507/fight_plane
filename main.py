@@ -75,14 +75,15 @@ def main():
     skill_1_entity = {
         "x": 0,
         "y": -1,
-        "spawn_probability": [[0, 800], 10],        #
+        "spawn_probability": [[0, 800], 1],  # every frame has 1/801 chance to spawn
+                                             # In [[range], n], whatever "n" is dose not matter
         "skill_1_photo": pygame.image.load("skill_1_entity.png")
     }
 
     skill_2_entity = {
         "x": 0,
         "y": -1,
-        "spawn_probability": [[0, 800], 10],
+        "spawn_probability": [[0, 800], 1],
         "skill_2_photo": pygame.image.load("skill_2_entity.png")
     }
 
@@ -475,6 +476,7 @@ def main():
                 disp.blit(quit_button_image[quit_button_image_index], (236, 464))
                 disp.blit(back_button_image[back_button_image_index], (236, 372))
                 pygame.display.update()
+
 
 
 if __name__ == "__main__":
