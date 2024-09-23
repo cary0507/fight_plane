@@ -1,483 +1,399 @@
 # -*- coding: utf-8 -*-
+# Made by Cary
 
-import pygame, random, sys, time
+import multiprocessing
+import pygame
+import sys
+import math
+import random
 from pygame.locals import *
 
+pygame.init()  # Initialize
 
-def is_crashed(des_sx, des_sy, des_ex, des_ey, type_sx, type_sy, type_ex, type_ey):  # Crash detect
-    if des_sx <= type_ex and des_ex >= type_sx:
-        if des_ey >= type_sy and des_sy <= type_ey:
+'''
+def move_spirit(en_list, en_tag, new_pos):
+    while True:
+        for en_index in range(len(en_list) - 1, -1, -1):
+            if en_list[en_index].tag == en_tag:
+                en_list[en_index].pos = new_pos
+        pygame.display.update()
+'''
+
+
+def circular_detect(radius, detected_pos=(0, 0), origin=(0, 0)):
+    if (((detected_pos[0] - origin[0]) ** 2) + ((detected_pos[1] - origin[1]) ** 2)) < (radius ** 2):
+        return True
+    else:
+        return False
+
+
+def get_slope(st_x, st_y, en_x, en_y):
+    return (en_y - st_y) / (en_x - st_x)
+
+
+def is_crashed(crasher_sx, crasher_sy, crasher_ex, crasher_ey, obj_sx, obj_sy, obj_ex, obj_ey):
+    # Rectangular collision detect if crasher crashed obj
+    if crasher_sx <= obj_ex and crasher_ex >= obj_sx:
+        if crasher_ey >= obj_sy and crasher_sy <= obj_ey:
             return True
     return False
 
 
+def countdown(count, step, stop):
+    if count - step >= stop:
+        count -= step
+    else:
+        count = 0
+    return count
+
+
+class FlyingObject:
+    def __init__(self, image, weight, height, hp, x_speed, y_speed, tag, pos=None, contact_dmg=100, shield=100,
+                 damaged_by=None, team=None):
+        # pos: left top of spirits
+        if pos is None:  # Initialize object position
+            pos = [0, 0]
+        self.image = pygame.image.load(image)
+        self.weight = weight
+        self.height = height
+        self.pos = pos  # pos = [x, y] -> pos[0]: x, pos[1]: y
+        self.hp = hp
+        self.shield = shield
+        self.x_speed = x_speed
+        self.y_speed = y_speed
+        '''
+        self.x_speed and self.y_speed determine the motion of the plane on x or y-axis
+        x_speed = 0: stay still    y_speed = 0: stay still
+        x_speed > 0: move right    y_speed > 0: move down
+        x_speed < 0: move left     y_speed < 0: move up
+        '''
+        self.tag = tag  # It tells the game what type of entity it is
+        self.contact_dmg = contact_dmg  # Damage when collided
+        self.gp_remain = 0  # Remaining invulnerable time
+        self.damaged_by = damaged_by
+        self.team = team
+
+    def explode(self, explode_radius, damage, check_entity_list, friend=None, friend_team=None):
+        for explosion_index in range(len(check_entity_list) - 1, - 1, - 1):
+            if circular_detect(explode_radius, (
+                    check_entity_list[explosion_index].pos[0] + math.floor(check_entity_list[explosion_index].weight / 2),
+                    check_entity_list[explosion_index].pos[1] + math.floor(check_entity_list[explosion_index].height / 2)),
+                               (self.pos[0] + math.floor(self.weight / 2),
+                                self.pos[1] + math.floor(self.height / 2))):  # Get center
+                # Prevent harming friends
+                if check_entity_list[explosion_index].tag != friend:
+                    check_entity_list[explosion_index].shield -= damage
+                elif check_entity_list[explosion_index].team != friend_team:
+                    check_entity_list[explosion_index].shield -= damage
+                if bool(friend) and bool(friend_team):  # AND detect, preventing arguments conflicts
+                    raise TypeError("One of the arguments \"friend\" and \"friend_team\" has to be None, yet both were given")
+
+
+class Plane(FlyingObject):
+    def fire(self, firing_x, firing_y, bullet_x_speed, bullet_y_speed, entity_check_list=None, bullet_team=None):
+        # Initializing unfilled arguments
+        if entity_check_list is None:
+            entity_check_list = []
+        if bullet_team is None:
+            bullet_team = self.team
+        # Initializing speed for bullet
+        if self.y_speed < 0:
+            bullet_y_speed += self.y_speed * 0.75
+        if self.x_speed != 0:
+            bullet_x_speed += self.x_speed * 0.25
+        bullet = Bullet(image='bullet.png', weight=5, height=16+abs(bullet_y_speed), hp=1, shield=0, y_speed=bullet_y_speed,
+                        x_speed=bullet_x_speed, tag="bullet", pos=[firing_x, firing_y], team=bullet_team)
+        entity_check_list.append(bullet)
+
+
+class Bullet(FlyingObject):
+    def track(self, obj_x, obj_y):
+        pass
+
+
 def main():
-    # Regular values
-    pygame.init()
-    fps = 60
-    fpsClock = pygame.time.Clock()
-    win_height = 800
-    win_weight = 600
-    disp = pygame.display.set_mode((win_weight, win_height))
-    background = pygame.image.load("background.png")
-    disp.blit(background, (0, 0))
+    # Basic settings
+    winW = 600
+    winH = 800
+    screen = pygame.display.set_mode((winW, winH))  # Set screen size
+    fps = 60  # 80 frames per second
+    fps_clock = pygame.time.Clock()
+    game_status = "in_game"  # All status: in_game; paused; died
 
-    # Scores' variables and constants
-    scores = 0
-    scoreFont = pygame.font.Font("freesansbold.ttf", 18)
+    # edge of camera                        Positions:
+    left_edge = ((0, 0), (0, 799))  # (top, bottom)
+    right_edge = ((599, 0), (599, 799))  # (top, bottom)
+    up_edge = ((0, 0), (599, 0))  # (left, right)
+    down_edge = ((0, 799), (599, 799))  # (left, right)
 
-    highest_score_file = open("highest_score.txt", "r")
+    # Text fonts & colors setup
+    general_font = pygame.font.Font("freesansbold.ttf", 18)
+    general_text_color = (0, 0, 0)
+    # Score tracking
+    score = 0
+    highest_score_file = open("highest_score.txt", "r")  # Opening score file
     highest_score = highest_score_file.read()
     highest_score_file.close()
-    highest_score_Font = pygame.font.Font("freesansbold.ttf", 18)
 
-    skills_font = pygame.font.Font("freesansbold.ttf", 15)  # Skills texts' font
+    # Global images, background text etc
+    game_over_img = pygame.image.load("Dead_text.png")
 
-    # Game Over's variables and constants
-    isDead = False
-    dead_text = pygame.image.load("Dead_text.png")
+    # spirits
+    my_plane = Plane(image='my_plane.png', weight=32, height=64, hp=1, shield=300, x_speed=1, y_speed=1, tag="my_plane",
+                     pos=[300, 600], team="player")
+    spawn_enemy_rate = 20  # 1 out of 50 per every frame
 
-    # Game Pause's variables and constants
-    isPause = False
-    pauseFont = pygame.font.Font("freesansbold.ttf", 50)
-    try_again_Font = pygame.font.Font("freesansbold.ttf", 24)
-    textColor = (0, 0, 0)   # Major texts' color
+    # CDs
+    max_fire_cd = 20
+    max_evade_cd = 40
+    current_fire_cd = 0
+    current_evade_cd = 0
 
-    # Entities' display data
-    bullets = {
-        "bullet_photo": pygame.image.load("bullets.png"),
-        "bulletX": 100,
-        "bulletY": 100
+    # Initialize entities
+    entity_list = [my_plane]
 
-    }
-    enemy_data = {
-        "enemy_photo": pygame.image.load("enemy_plane.png"),
-        "ene_x": 0,
-        "ene_y": 5
-    }
-
-    # Skills' display data
-    skill_1 = {
-        "number": 0,
-        "photo": [pygame.image.load("skill_1.png"), pygame.image.load("click_skill_1.png")],
-        "photo_x": 510,
-        "photo_y": 233,
-        "delay_to_fire": 5
-    }
-
-    skill_2 = {
-        "number": 0,
-        "photo": [pygame.image.load("skill_2.png"), pygame.image.load("click_skill_2.png")],
-        "photo_x": 510,
-        "photo_y": 290
-    }
-
-    skill_1_entity = {
-        "x": 0,
-        "y": -1,
-        "spawn_probability": [[0, 800], 1],  # every frame has 1/801 chance to spawn
-                                             # In [[range], n], whatever "n" is dose not matter
-        "skill_1_photo": pygame.image.load("skill_1_entity.png")
-    }
-
-    skill_2_entity = {
-        "x": 0,
-        "y": -1,
-        "spawn_probability": [[0, 800], 1],
-        "skill_2_photo": pygame.image.load("skill_2_entity.png")
-    }
-
-    skill_1_index = 0
-    skill_2_index = 0
-
-    skill_1_using = False
-    skill_1_cd = 0
-    skill_1_cdX = skill_1["photo_x"]
-    skill_1_cdY = skill_1["photo_y"]
-    skill_1_lifetime = 0
-    skill_1_delay = 0
-
-    skill_cd_height = 48
-    skill_cd_weight = 1
-
-    skill_2_using = False
-    skill_2_cd = 0
-    skill_2_cdX = skill_2["photo_x"]
-    skill_2_cdY = skill_2["photo_y"]
-
-    shield_photos = [pygame.image.load("empty_shield.png"), pygame.image.load("one_shield.png"),
-                     pygame.image.load("two_shields.png"), pygame.image.load("full_shield.png")]
-    shield_num = 3
-    reward = 100
-
-    plane_photo = pygame.image.load("my_plane.png")
-    plane_mid_pos = (0, 0)
-    planex, planey = 299, 399
-
-    mouseX = 0
-    mouseY = 0
-    mouseClicked = False
-    fire_delay = 0
-    emytime = 0
-    skill_1_time = 0
-    skill_2_time = 0
-
-    moveD = False
-    moveU = False
-    moveL = False
-    moveR = False
-    planeSpeed = 6
-
-    bullets_list = []
-    fire = False
-    emy_list = []
-    skills_list = []
-    friend_plane_list = []
-    friend_plane_photo = pygame.image.load("plane_2.png")
-    friend_plane_speed = 3
-
-    # edge of camera
-    left_edge = ((0, 0), (0, 799))
-    right_edge = ((599, 0), (599, 799))
-    up_edge = ((0, 0), (599, 0))
-    down_edge = ((0, 799), (599, 799))
-
+    # Keys setting
+    mouse_x = 0
+    mouse_y = 0
+    move_up = False
+    move_down = False
+    move_left = False
+    move_right = False
+    evade_direction = [0, 0]  # int: [dash left, dash right], determine evade distance
+    key_holding = [0, 0]  # [left/right, up/down] Controls the accelerating speed of the plane
+    space = False
+    # Main loop
     while True:
-        if not (isDead and isPause):
-            # print("skill_2 cd:{0}\nskill_2 using:{1}".format(skill_2_cd, skill_2_using))
-            mouseClicked = False
-            if scores > int(highest_score):
-                highest_score = scores
-                highest_score_file = open("highest_score.txt", "w")
-                highest_score_file.write(str(highest_score))
-                highest_score_file.close()
+        if game_status == "in_game":  # In game
+            # Basic settings
+            entity_list_len = len(entity_list)
+            mouse_clicked = False
+            screen.fill((255, 255, 255))
+            if current_fire_cd > 0:
+                current_fire_cd -= 1
+            if current_evade_cd > 0:
+                current_evade_cd -= 1
+            for gp in range(entity_list_len - 1, -1, -1):
+                if entity_list[gp].gp_remain > 0:
+                    entity_list[gp].gp_remain -= 1
 
-            # print("emy_list:{0},bullet_list:{1}".format(emy_list, bullets_list))
-            score_text = scoreFont.render("Score:{0}".format(scores), True, textColor)
-            score_rect = score_text.get_rect()
-            score_rect.center = (535, 30)
+            #  Texts initializing
+            text = general_font.render("Score: {0}".format(score), True, general_text_color)
+            text_rect = text.get_rect()
+            text_rect.center = (535, 30)
+            highest_score_text = general_font.render("Highest Score: {0}".format(highest_score), True, general_text_color)
+            high_score_rect = highest_score_text.get_rect()
+            high_score_rect.center = (500, 60)
 
-            highest_score_text = highest_score_Font.render("Highest Score:{0}".format(highest_score), True, textColor)
-            highest_score_rect = highest_score_text.get_rect()
-            highest_score_rect.center = (500, 60)
+            # Detecting spirits crashing
+            for player_team_i in range(entity_list_len - 1, -1, -1):
+                if entity_list[player_team_i].team == "player":
+                    for enm_i in range(entity_list_len - 1, -1, -1):
+                        if entity_list[enm_i].team == "enemy":
+                            if is_crashed(crasher_sx=entity_list[player_team_i].pos[0],
+                                          crasher_sy=entity_list[player_team_i].pos[1],
+                                          crasher_ex=entity_list[player_team_i].pos[0] + entity_list[player_team_i].weight,
+                                          crasher_ey=entity_list[player_team_i].pos[1] + entity_list[player_team_i].height,
 
-            skill_1_text = skills_font.render("{0}".format(skill_1["number"]), True, textColor)
-            skill_1_rect = skill_1_text.get_rect()
-            skill_1_rect.center = (skill_1["photo_x"] + 50, skill_1["photo_y"] + 45)
+                                          obj_sx=entity_list[enm_i].pos[0], obj_sy=entity_list[enm_i].pos[1],
+                                          obj_ex=entity_list[enm_i].pos[0] + entity_list[enm_i].weight,
+                                          obj_ey=entity_list[enm_i].pos[1] + entity_list[enm_i].height):
+                                # Dealing damages and pending deletion
+                                if not entity_list[player_team_i].gp_remain:
+                                    entity_list[player_team_i].shield -= entity_list[enm_i].contact_dmg
+                                    entity_list[player_team_i].damaged_by = entity_list[enm_i]
+                                    entity_list[enm_i].shield -= entity_list[player_team_i].contact_dmg
+                                    entity_list[enm_i].damaged_by = entity_list[player_team_i]
 
-            skill_2_text = skills_font.render("{0}".format(skill_2["number"]), True, textColor)
-            skill_2_rect = skill_2_text.get_rect()
-            skill_2_rect.center = (skill_2["photo_x"] + 50, skill_2["photo_y"] + 45)
+            # Dealing hp damages to spirits with negative shields
+            for health in range(entity_list_len - 1, -1, -1):
+                if entity_list[health].shield < 0:
+                    entity_list[health].hp += entity_list[health].shield
 
-            emytime = random.randint(0, 30)
-            skill_1_time = random.randint(skill_1_entity["spawn_probability"][0][0],
-                                          skill_1_entity["spawn_probability"][0][1])
-            skill_2_time = random.randint(skill_2_entity["spawn_probability"][0][0],
-                                          skill_2_entity["spawn_probability"][0][1])
-            # print("skill_1:{0}\nskill_2:{1}".format(skill_1_time, skill_2_time))
-            # print("time:%s" % time)
+            # Spawn entities
+            do_spawn_enemy = (random.randint(1, spawn_enemy_rate) == 1)
+            if do_spawn_enemy:
+                enemy_pos = [random.randint(0, right_edge[0][0] - 24), -20]
+                enemy_speed = random.randint(2, 10)
+                new_enemy = Plane(image='enemy_plane.png', weight=24, height=24, hp=1, shield=0, x_speed=0,
+                                  y_speed=enemy_speed,
+                                  tag="weak_enemy", pos=enemy_pos, team="enemy")
+                entity_list.append(new_enemy)
 
-            if fire_delay < 20:
-                fire_delay += 1
-            if skill_1_delay < skill_1["delay_to_fire"]:
-                skill_1_delay += 1
-            if skill_1_cd > 0:
-                if skill_1_cd % 4 == 0:
-                    skill_cd_weight = skill_1_cd / 4
-                skill_1_cd -= 12
-            if skill_1_using and skill_1_lifetime > 0:
-                skill_1_lifetime -= 1
-                if skill_1_lifetime == 0:
-                    skill_1_cd = 196
-                    skill_1_using = False
-            if skill_2_using and skill_2_cd == 0:
-                if len(emy_list) > 5:
-                    for summon in range(len(emy_list) - 1, -1, -1):
-                        friend_plane_list.append([friend_plane_photo, emy_list[summon][1], 840])
-                    skill_2_using = False
-                    skill_2_cd = 392
-                else:
-                    for summon in range(len(emy_list) - 1, -1, -1):
-                        friend_plane_list
-
+            # Key detection
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
                 if event.type == pygame.MOUSEMOTION:
-                    mouseX, mouseY = event.pos
+                    mouse_x, mouse_y = event.pos
                 if event.type == pygame.MOUSEBUTTONUP:
-                    mouseClicked = True
-                if event.type == pygame.KEYUP:
+                    mouse_clicked = True
+                if event.type == pygame.KEYDOWN:  # Hold keys
                     if event.key == K_w:
-                        moveU = False
-                    if event.key == K_s:
-                        moveD = False
-                    if event.key == K_a:
-                        moveL = False
-                    if event.key == K_d:
-                        moveR = False
-                    if event.key == K_SPACE:
-                        fire = False
-                    if event.key == K_ESCAPE:
-                        isPause = True
-                elif event.type == KEYDOWN:
-                    if event.key == K_w:
-                        moveU = True
-                        moveD = False
+                        move_up = True
+                        move_down = False
+                        key_holding[1] = 1
                     elif event.key == K_s:
-                        moveU = False
-                        moveD = True
-                    if event.key == K_a:
-                        moveL = True
-                        moveR = False
-                    elif event.key == K_d:
-                        moveL = False
-                        moveR = True
+                        move_down = True
+                        move_up = False
+                        key_holding[1] = 1
+                    if not evade_direction[0] and not evade_direction[1]:
+                        if event.key == K_d:
+                            move_right = True
+                            move_left = False
+                            key_holding[0] = 1
+                        elif event.key == K_a:
+                            move_left = True
+                            move_right = False
+                            key_holding[0] = 1
+                        if event.key == K_SPACE:
+                            space = True
+                elif event.type == pygame.KEYUP:  # Release keys
+                    if event.key == K_w:
+                        move_up = False
+                        key_holding[1] = 0
+                    elif event.key == K_s:
+                        move_down = False
+                        key_holding[1] = 0
+                    if not evade_direction[0] and not evade_direction[1]:
+                        if event.key == K_d:
+                            move_right = False
+                            key_holding[0] = 0
+                        elif event.key == K_a:
+                            move_left = False
+                            key_holding[0] = 0
                     if event.key == K_SPACE:
-                        fire = True
+                        space = False
+                    # Arrow keys: evasion=gp
+                    if event.key == K_LEFT:
+                        evade_direction[0] = 8
+                        evade_direction[1] = 0
+                        my_plane.gp_remain = 7
+                    elif event.key == K_RIGHT:
+                        evade_direction[0] = 0
+                        evade_direction[1] = 8
+                        my_plane.gp_remain = 7
 
-            if moveU:
-                planey -= planeSpeed
-            if moveD:
-                planey += planeSpeed
-            if moveL:
-                planex -= planeSpeed
-            if moveR:
-                planex += planeSpeed
-            if fire:
-                if skill_1_using and skill_1_lifetime > 0 and skill_1_delay == skill_1["delay_to_fire"]:
-                    bullets["bulletX"] = plane_mid_pos[0] - 8
-                    bullets["bulletY"] = plane_mid_pos[1]
-                    newbullt = [None, None, None]
-                    # print(mouseX, mouseY)
-                    newbullt[0], newbullt[1], newbullt[2] = bullets["bullet_photo"], bullets["bulletX"], bullets[
-                        "bulletY"]
-                    bullets_list.append(newbullt)
-                    skill_1_delay = 0
-                if fire_delay >= 20:
-                    bullets["bulletX"] = plane_mid_pos[0] - 8
-                    bullets["bulletY"] = plane_mid_pos[1]
-                    newbullt = [None, None, None]
-                    # print(mouseX, mouseY)
-                    newbullt[0], newbullt[1], newbullt[2] = bullets["bullet_photo"], bullets["bulletX"], bullets[
-                        "bulletY"]
-                    bullets_list.append(newbullt)
-                    # print("new bullet:{0}".format(bullets_list))
-                    fire_delay = 0
+            # Accelerating the plane
+            if key_holding[0] and my_plane.x_speed < 5 and move_right:
+                my_plane.x_speed += 0.25
+            if key_holding[0] and my_plane.x_speed > -5 and move_left:
+                my_plane.x_speed -= 0.25
+            if key_holding[1] and my_plane.y_speed > -5 and move_up:
+                my_plane.y_speed -= 0.75
+            if key_holding[1] and my_plane.y_speed < 5 and move_down:
+                my_plane.y_speed += 0.75
 
-            if planex < left_edge[0][0]:
-                planex = 0
-            if planey < up_edge[0][1]:
-                planey = 0
-            if (planex + 31) > right_edge[0][0]:
-                planex = right_edge[0][0] - 31
-            if (planey + 61) > down_edge[0][1]:
-                planey = down_edge[0][1] - 63
-
-            if emytime == 16:
-                enemy_data["ene_x"] = random.randint(0, right_edge[0][0] - 15)
-                enemy_data["ene_y"] = -8
-                newemy = [None, None, None]
-                newemy[0], newemy[1], newemy[2] = enemy_data["enemy_photo"], enemy_data["ene_x"], enemy_data["ene_y"]
-                emy_list.append(newemy)
-
-            if skill_1_time == skill_1_entity["spawn_probability"][1]:
-                skill_1_entity["x"] = random.randint(0, right_edge[0][0] - 48)
-                skill_1_entity["y"] = -8
-                new_skill_1 = [skill_1_entity["skill_1_photo"], skill_1_entity["x"], skill_1_entity["y"], "skill_1"]
-                skills_list.append(new_skill_1)
-
-            if skill_2_time == skill_2_entity["spawn_probability"][1]:
-                skill_2_entity["x"] = random.randint(0, right_edge[0][0] - 48)
-                skill_2_entity["y"] = -8
-                new_skill_2 = [skill_2_entity["skill_2_photo"], skill_2_entity["x"], skill_2_entity["y"], "skill_2"]
-                skills_list.append(new_skill_2)
-            # print("skill_1_photo:{0}\nskill_2_photo:{1}".format(skill_1_entity["skill_1_photo"], skill_2_entity["skill_2_photo"]))
-
-            if scores == reward:
-                shield_num = 3
-                reward *= 2.5
-
-            if len(emy_list) > 0:
-                for emy_des in range(len(emy_list) - 1, -1, -1):
-                    for z in range(len(bullets_list) - 1, -1, -1):
-                        try:
-                            # print("\temy_list[{0}]:{1},bullets[{2}]:{3}".format(emy_des, emy_list[emy_des], z, bullets_list[z]))
-                            # print("emy_list < bullets, bullets:%s, emy:%s" % (len(bullets_list), len(emy_list)))
-                            if is_crashed(emy_list[emy_des][1], emy_list[emy_des][2], emy_list[emy_des][1] + 23,
-                                          emy_list[emy_des][2] + 23, bullets_list[z][1], bullets_list[z][2],
-                                          bullets_list[z][1] + 17, bullets_list[z][2] + 15):
-                                del bullets_list[z], emy_list[emy_des]
-                                scores += 1
-                        except IndexError:
-                            # print("index error")
-                            # print("emy_des={0},z={1},len_emy={2},len_bullets={3}".format(emy_des, z, len(emy_list), len(bullets_list)))
-                            pass
-            """ if len(emy_list) < len(bullets_list):
-                for z in range(len(bullets_list) - 1, -1, -1):
-                    for emy_des in range(len(emy_list) - 1, -1, -1):
-                        print("bullets > emy_list, bullets:%s, emy:%s" % (len(bullets_list), len(emy_list)))
-                        if is_crashed(emy_list[emy_des][1], emy_list[emy_des][2], emy_list[emy_des][1] + 23, emy_list[emy_des][2] + 23, bullet s_list[z][1], bullets_list[z][2], bullets_list[z][1] + 4, bullets_list[z][2] + 15):
-                            del bullets_list[z], emy_list[emy_des]
-            """
-
-            if is_crashed(skill_1["photo_x"], skill_1["photo_y"], skill_1["photo_x"] + 47, skill_1["photo_y"] + 47,
-                          mouseX, mouseY, mouseX, mouseY):
-                skill_1_index = 1
-                skill_2_index = 0
-                if mouseClicked and skill_1["number"] > 0 and skill_1_cd < 1 and not skill_1_using:
-                    skill_1_using = True
-                    skill_1_lifetime = 180
-                    skill_1["number"] -= 1
-            elif is_crashed(skill_2["photo_x"], skill_2["photo_y"], skill_2["photo_x"] + 47, skill_2["photo_y"] + 47,
-                            mouseX, mouseY, mouseX, mouseX):
-                skill_1_index = 0
-                skill_2_index = 1
-                if mouseClicked and skill_2["number"] > 0 and skill_2_cd < 1:
-                    skill_2["number"] -= 1
-                    skill_2_using = True
+            # Setting the x and y axis motions of the plane
+            if move_up:
+                key_holding[1] = 1
+                if my_plane.y_speed > 0:
+                    my_plane.y_speed = -my_plane.y_speed
+            elif move_down:
+                key_holding[1] = 1
+                if my_plane.y_speed < 0:
+                    my_plane.y_speed = -my_plane.y_speed
             else:
-                skill_1_index = 0
-                skill_2_index = 0
+                my_plane.y_speed = 0
 
-            disp.blit(background, (0, 0))
+            if move_right:
+                key_holding[0] = 1
+                if my_plane.x_speed < 0:
+                    my_plane.x_speed = -my_plane.x_speed
+            elif move_left:
+                key_holding[0] = 1
+                if my_plane.x_speed > 0:
+                    my_plane.x_speed = -my_plane.x_speed
+            else:
+                my_plane.x_speed = 0
 
-            for e in range(len(emy_list) - 1, -1, -1):
-                if is_crashed(planex, planey, planex + 31, planey + 63, emy_list[e][1], emy_list[e][2],
-                              emy_list[e][1] + 23, emy_list[e][2] + 23):
-                    if shield_num == 0:
-                        isDead = True
-                    else:
-                        shield_num -= 1
-                        del emy_list[e]
+            # Plane evasion movements
+            if evade_direction[0]:
+                evade_direction[0] -= 1
+                my_plane.pos[0] -= 10 + 3 * evade_direction[0]
+            elif evade_direction[1]:
+                evade_direction[1] -= 1
+                my_plane.pos[0] += 10 + 3 * evade_direction[1]
 
-            for s in range(len(skills_list) - 1, -1, -1):
-                if is_crashed(planex, planey, planex + 31, planey + 63, skills_list[s][1], skills_list[s][2],
-                              skills_list[s][1] + 47, skills_list[s][2] + 47):
-                    if skills_list[s][3] == "skill_1" and skill_1["number"] < 5:
-                        skill_1["number"] += 1
-                        del skills_list[s]
-                    elif skills_list[s][3] == "skill_2" and skill_2["number"] < 5:
-                        skill_2["number"] += 1
-                        del skills_list[s]
+            # Plane fire
+            if space and current_fire_cd < 1:
+                my_plane.fire(firing_x=my_plane.pos[0] + math.floor(my_plane.weight / 2) - 7,
+                              firing_y=my_plane.pos[1] + math.floor(my_plane.height / 2) - 24, bullet_x_speed=0,
+                              bullet_y_speed=-10, entity_check_list=entity_list)
+                my_plane.fire(firing_x=my_plane.pos[0] + math.floor(my_plane.weight / 2) + 2,
+                              firing_y=my_plane.pos[1] + math.floor(my_plane.height / 2) - 24, bullet_x_speed=0,
+                              bullet_y_speed=-10, entity_check_list=entity_list)
+                current_fire_cd = max_fire_cd
 
-            if len(friend_plane_list):
-                for att in range(len(friend_plane_list) - 1, -1, -1):
-                    disp.blit(friend_plane_list[att][0], (friend_plane_list[att][1], friend_plane_list[att][2]))
-                for atty in range(len(friend_plane_list) - 1, -1, -1):
-                    friend_plane_list[atty][2] -= friend_plane_speed
-                for delete in range(len(friend_plane_list) - 1, -1, -1):
-                    if friend_plane_list[delete][2] <= 0:
-                        del friend_plane_list[delete]
+            # Spirits movements
+            for ent_i in range(entity_list_len - 1, -1, -1):
+                entity_list[ent_i].pos[0] += entity_list[ent_i].x_speed
+                entity_list[ent_i].pos[1] += entity_list[ent_i].y_speed
 
-            for i in range(len(bullets_list) - 1, -1, -1):
-                disp.blit(bullets_list[i][0], (bullets_list[i][1], bullets_list[i][2]))
-            for x in range(len(bullets_list) - 1, -1, -1):
-                bullets_list[x][2] -= 20
-                # print(bullets_list)
-            for y in range(len(bullets_list) - 1, -1, -1):
-                if bullets_list[y][2] <= 0:
-                    del bullets_list[y]
+            # Preventing plane from moving away the screen
+            if my_plane.pos[0] < left_edge[0][0]:
+                my_plane.pos[0] = 0
+                my_plane.x_speed = 0
+            if my_plane.pos[1] < up_edge[0][1]:
+                my_plane.pos[1] = 0
+                my_plane.y_speed = 0
+            if (my_plane.pos[0] + my_plane.weight - 1) > right_edge[0][0]:
+                my_plane.pos[0] = right_edge[0][0] - 31
+                my_plane.x_speed = 0
+            if (my_plane.pos[1] + my_plane.height - 1) > down_edge[0][1]:
+                my_plane.pos[1] = down_edge[0][1] - 63
+                my_plane.y_speed = 0
 
-            for emy_i in range(len(emy_list) - 1, -1, -1):
-                disp.blit(enemy_data["enemy_photo"], (emy_list[emy_i][1], emy_list[emy_i][2]))
-            for emy_down in range(len(emy_list) - 1, -1, -1):
-                emy_list[emy_down][2] += 10
-            for emy_del in range(len(emy_list) - 1, -1, -1):
-                if emy_list[emy_del][2] >= 800:
-                    del emy_list[emy_del]
+            # Displaying entities on the screen
+            for i in range(entity_list_len - 1, -1, -1):
+                screen.blit(entity_list[i].image, entity_list[i].pos)
+            # Displaying texts
+            screen.blit(text, text_rect)
+            screen.blit(highest_score_text, high_score_rect)
 
-            for skills in range(len(skills_list) - 1, -1, -1):
-                disp.blit(skills_list[skills][0], (skills_list[skills][1], skills_list[skills][2]))
-            for skills_down in range(len(skills_list) - 1, -1, -1):
-                skills_list[skills_down][2] += 1022
-            for skills_del in range(len(skills_list) - 1, -1, -1):
-                if skills_list[skills_del][2] >= 800:
-                    del skills_list[skills_del]
+            # Deleting spirits too far away from the camera
+            for entity in range(entity_list_len - 1, -1, -1):
+                if entity_list[entity].tag != "my_plane":
+                    if not is_crashed(crasher_sx=entity_list[entity].pos[0], crasher_sy=entity_list[entity].pos[1],
+                                      crasher_ex=entity_list[entity].pos[0] + entity_list[entity].weight,
+                                      crasher_ey=entity_list[entity].pos[1] + entity_list[entity].height,
 
-            disp.blit(plane_photo, (planex, planey))
-            disp.blit(score_text, score_rect)
-            disp.blit(highest_score_text, highest_score_rect)
-            disp.blit(shield_photos[shield_num], (0, 5))
-            disp.blit(skill_1["photo"][skill_1_index], (skill_1["photo_x"], skill_1["photo_y"]))
-            disp.blit(skill_1_text, skill_1_rect)
-            if skill_cd_weight > 1:
-                pygame.draw.rect(disp, (128, 128, 128), (skill_1_cdX, skill_1_cdY, skill_cd_weight, skill_cd_height))
-            plane_mid_pos = (planex + 15, planey + 31)
-            disp.blit(skill_2["photo"][skill_2_index], (skill_2["photo_x"], skill_2["photo_y"]))
-            disp.blit(skill_2_text, skill_2_rect)
+                                      obj_sx=left_edge[0][0], obj_sy=left_edge[0][1],
+                                      obj_ex=right_edge[1][0], obj_ey=right_edge[1][1]):
+                        entity_list[entity].hp = 0
+
+            # Killing entities with hp less than 1
+            for kill in range(entity_list_len - 1, -1, -1):
+                if entity_list[kill].hp < 1:
+                    if entity_list[kill].tag == "bullet":
+                        entity_list[kill].explode(explode_radius=20, damage=20, check_entity_list=entity_list, friend_team="player")
+                    if entity_list[kill].tag == "weak_enemy":
+                        entity_list[kill].explode(explode_radius=40, damage=20, check_entity_list=entity_list)
+                        if entity_list[kill].damaged_by:
+                            if entity_list[kill].damaged_by.team == "player" and entity_list[kill].damaged_by.tag != "my_plane":
+                                score += 1
+                    if entity_list[kill].tag == "my_plane":
+                        game_status = "died"
+                    del entity_list[kill]
 
             pygame.display.update()
-            fpsClock.tick(fps)
-
-        if isDead:
-            while True:
-                try_again_text = try_again_Font.render("Press Enter to Rebirth", True, textColor)
-                try_again_rect = try_again_text.get_rect()
-                try_again_rect.center = (win_weight / 2, win_height / 2 + 50)
-
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
+            fps_clock.tick(fps)
+        if game_status == "died":
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                if event.type == pygame.KEYUP:
+                    if event.key == K_ESCAPE:
                         pygame.quit()
                         sys.exit()
-                    if event.type == pygame.KEYUP:
-                        if event.key == K_ESCAPE:
-                            pygame.quit()
-                            sys.exit()
-                        if event.key == K_RETURN:
-                            main()
-                disp.blit(try_again_text, try_again_rect)
-                disp.blit(dead_text, (0, 0))
-                pygame.display.update()
+                    if event.key == K_RETURN:
+                        main()
 
-        if isPause:
-            quit_button_image_index = 0
-            back_button_image_index = 0
-
-            while isPause:
-                mouseClicked = False
-
-                pauseText = pauseFont.render("Pause", True, textColor)
-                pauseRect = pauseText.get_rect()
-                pauseRect.center = (win_weight / 2, 60)
-
-                quit_button_image = [pygame.image.load("quit_button.png"), pygame.image.load("quit_button2.png")]
-                back_button_image = [pygame.image.load("back_button.png"), pygame.image.load("back_button2.png")]
-
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        pygame.quit()
-                        sys.exit()
-                    if event.type == pygame.KEYUP:
-                        if event.key == K_ESCAPE:
-                            pygame.quit()
-                            sys.exit()
-                    if event.type == pygame.MOUSEMOTION:
-                        mouseX, mouseY = event.pos
-                    if event.type == pygame.MOUSEBUTTONUP:
-                        mouseClicked = True
-
-                if is_crashed(236, 372, 364, 436, mouseX, mouseY, mouseX, mouseY):
-                    back_button_image_index = 1
-                    quit_button_image_index = 0
-                    if mouseClicked:
-                        isPause = False
-                elif is_crashed(236, 464, 364, 528, mouseX, mouseY, mouseX, mouseY):
-                    back_button_image_index = 0
-                    quit_button_image_index = 1
-                    if mouseClicked:
-                        pygame.quit()
-                        sys.exit()
-                else:
-                    back_button_image_index, quit_button_image_index = 0, 0
-
-                disp.blit(pauseText, pauseRect)
-                disp.blit(quit_button_image[quit_button_image_index], (236, 464))
-                disp.blit(back_button_image[back_button_image_index], (236, 372))
-                pygame.display.update()
+            screen.blit(game_over_img, (0, 0))
+            pygame.display.update()
 
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
